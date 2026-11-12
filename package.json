@@ -1,0 +1,11 @@
+{
+  "name": "pizza-self-order",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Hệ thống đặt và bán bánh Pizza tự động tại bàn ăn",
+  "scripts": {
+    "setup": "npm install --prefix server && npm install --prefix client && npm run build --prefix client",
+    "build": "npm run build --prefix client",
+    "start": "node server/index.js"
+  }
+}
