@@ -266,7 +266,7 @@ function CustomizeScreen({ ctx, maMon, editKey }: { ctx: Ctx; maMon: string; edi
             <div className="segment">{menu.crusts.map((c) => <button className={crust === c.maVo ? "active" : ""} onClick={() => { setCrust(c.maVo); setError(""); }} key={c.maVo}>{c.tenVo}<small>{c.phuThu ? `+${money(c.phuThu)}` : c.tenVo === "Giòn" ? "Mỏng, giòn rụm" : "Không phụ thu"}</small></button>)}</div>
             <OptionTitle number="3" title="Kích thước" optional={false} />
             <div className="size-options">{menu.sizes.map((s) => {
-              const meta: Record<string, string> = { S: "20 cm · 1 người", M: "28 cm · 2 người", L: "35 cm · 3–4 người" };
+              const meta: Record<string, string> = { S: "20 cm · 1 người", M: "25 cm · 2 người", L: "30 cm · 3–4 người" };
               return <button key={s.maKT} className={size === s.maKT ? "active" : ""} onClick={() => { setSize(s.maKT); setError(""); }}><span className={`pizza-size size-${s.tenKT}`}>●</span><b>{s.tenKT} · {money(dish.gia?.[s.maKT] || 0)}</b><small>{meta[s.maKT]}</small>{size === s.maKT && <span className="selected-check"><Icon name="check" size={13} /></span>}</button>;
             })}</div>
             {custom ? (
