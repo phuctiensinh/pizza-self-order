@@ -206,3 +206,9 @@
   .print-only { display: block; }
   .chart-card, .kpi-card, .top-products { break-inside: avoid; }
 }
+
+/* Sửa: số doanh thu không bị thanh tiến độ đè; toast không che chân màn hình */
+.product-ranking > div { row-gap: 6px; }
+.product-ranking .mini-progress { grid-column: 2 / 4; }
+.product-ranking > div > strong { margin-top: 0 !important; grid-column: 2 / 4; text-align: right; }
+.toast-stack { left: auto; right: 24px; top: 88px; bottom: auto; transform: none; align-items: flex-end; }
