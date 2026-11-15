@@ -1,56 +1,64 @@
-// Kết nối SQL Server (CSDL PizzaDB)
-// Mặc định dùng Windows Authentication qua ODBC Driver 18.
-// Có thể đổi bằng biến môi trường DB_CONN, ví dụ dùng tài khoản SQL:
-//   Driver={ODBC Driver 18 for SQL Server};Server=localhost;Database=PizzaDB;Uid=sa;Pwd=***;TrustServerCertificate=yes;
-// Khi có DB_SERVER (ví dụ Azure SQL khi chạy trên Vercel) thì dùng driver tedious (thuần JS).
-const useCloud = !!process.env.DB_SERVER || process.platform !== 'win32';
-const sql = useCloud ? require('mssql') : require('mssql/msnodesqlv8');
+// Kết nối PostgreSQL (CSDL pizzadb)
+// Cấu hình bằng biến môi trường DATABASE_URL, ví dụ:
+//   postgres://postgres:matkhau@localhost:5432/pizzadb
+// Khi chạy trên cloud (Render, Neon, Supabase...) đặt thêm DB_SSL=true nếu nhà cung cấp yêu cầu SSL.
+// Giờ Việt Nam cho Node (Vercel mặc định UTC và không cho đặt biến TZ)
+process.env.TZ = process.env.APP_TZ || 'Asia/Ho_Chi_Minh';
+const { Pool, types } = require('pg');
 
-const connectionString =
-  process.env.DB_CONN ||
-  'Driver={ODBC Driver 18 for SQL Server};Server=localhost;Database=PizzaDB;Trusted_Connection=yes;TrustServerCertificate=yes;';
-const cloudConfig = {
-  server: process.env.DB_SERVER,
-  database: process.env.DB_NAME || 'PizzaDB',
-  user: process.env.DB_USER,
-  password: process.env.DB_PASSWORD,
-  options: { encrypt: true, trustServerCertificate: false },
-  pool: { max: 5, min: 0, idleTimeoutMillis: 30000 },
-};
+// Trả số thay vì chuỗi cho BIGINT (COUNT) và NUMERIC (tiền); giữ DATE dạng 'YYYY-MM-DD'
+types.setTypeParser(20, (v) => parseInt(v, 10));
+types.setTypeParser(1700, (v) => parseFloat(v));
+types.setTypeParser(1082, (v) => v);
 
-let poolPromise = null;
+const connectionString = process.env.DATABASE_URL || 'postgres://postgres:postgres@localhost:5432/pizzadb';
+const useSsl = process.env.DB_SSL === 'true' || /sslmode=require/.test(connectionString);
+const pool = new Pool({ connectionString, ssl: useSsl ? { rejectUnauthorized: false } : undefined, max: Number(process.env.DB_POOL_MAX) || 5 });
 
-function getPool() {
-  if (!poolPromise) {
-    poolPromise = new sql.ConnectionPool(useCloud ? cloudConfig : { connectionString }).connect().catch((err) => {
-      poolPromise = null;
-      throw err;
-    });
-  }
-  return poolPromise;
+const getPool = async () => pool;
+
+// Postgres trả tên cột chữ thường; khôi phục đúng tên viết trong câu SQL (MaDon, soDon, ...)
+function restoreCase(text, rows) {
+  if (!rows.length) return rows;
+  const names = new Map();
+  for (const w of text.match(/(?<![@\w])[A-Za-z_]\w*(?!['\w])/g) || []) names.set(w.toLowerCase(), w);
+  const keys = Object.keys(rows[0]).map((k) => [k, names.get(k) || k]);
+  return rows.map((r) => Object.fromEntries(keys.map(([k, n]) => [n, r[k]])));
+}
+
+/** Đổi tham số @ten thành $1, $2... */
+function compile(text, params) {
+  const values = [];
+  const index = {};
+  const sqlText = text.replace(/(?<![@\w])@(\w+)/g, (m, name) => {
+    if (!(name in params)) return m;
+    if (!index[name]) { values.push(params[name] === undefined ? null : params[name]); index[name] = values.length; }
+    return `$${index[name]}`;
+  });
+  return { sqlText, values };
 }
 
 /** Chạy câu truy vấn có tham số: query('SELECT ... WHERE A = @a', { a: 1 }) */
-async function query(text, params = {}, tx = null) {
-  const req = tx ? new sql.Request(tx) : (await getPool()).request();
-  for (const [k, v] of Object.entries(params)) req.input(k, v);
-  const res = await req.query(text);
-  return res.recordset || [];
+async function query(text, params = {}, client = null) {
+  const { sqlText, values } = compile(text, params);
+  const res = await (client || pool).query(sqlText, values);
+  return restoreCase(text, res.rows || []);
 }
 
 /** Chạy một nhóm lệnh trong giao tác (transaction) */
 async function transaction(fn) {
-  const pool = await getPool();
-  const tx = new sql.Transaction(pool);
-  await tx.begin();
+  const client = await pool.connect();
   try {
-    const result = await fn((text, params) => query(text, params, tx));
-    await tx.commit();
+    await client.query('BEGIN');
+    const result = await fn((text, params) => query(text, params, client));
+    await client.query('COMMIT');
     return result;
   } catch (err) {
-    try { await tx.rollback(); } catch { /* bỏ qua */ }
+    try { await client.query('ROLLBACK'); } catch { /* bỏ qua */ }
     throw err;
+  } finally {
+    client.release();
   }
 }
 
-module.exports = { sql, getPool, query, transaction };
+module.exports = { pool, getPool, query, transaction };

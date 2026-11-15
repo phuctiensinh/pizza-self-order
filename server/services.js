@@ -43,7 +43,7 @@ async function loadMenu({ includeStopped = false } = {}) {
     FROM GiaTheoKichThuoc g
     WHERE g.NgayApDung = (SELECT MAX(g2.NgayApDung) FROM GiaTheoKichThuoc g2
                           WHERE g2.MaMon = g.MaMon AND g2.MaKT = g.MaKT
-                            AND g2.NgayApDung <= CAST(GETDATE() AS DATE))`);
+                            AND g2.NgayApDung <= CAST(NOW() AT TIME ZONE 'Asia/Ho_Chi_Minh' AS DATE))`);
 
   const fixed = await query(`
     SELECT bt.MaMon, t.MaTP, t.TenTP, t.SoLuongTon
@@ -207,10 +207,9 @@ async function recalcOrder(run, maDon) {
   await run(`
     UPDATE DonHang SET
       TamTinh = x.Tam, ThueVAT = ROUND(x.Tam * ${VAT_RATE}, 0), TongTien = x.Tam + ROUND(x.Tam * ${VAT_RATE}, 0)
-    FROM DonHang d
-    CROSS APPLY (SELECT ISNULL(SUM(ThanhTien), 0) AS Tam FROM ChiTietDonHang
-                 WHERE MaDon = d.MaDon AND TrangThaiCheBien <> 'DA_HUY') x
-    WHERE d.MaDon = @maDon`, { maDon });
+    FROM (SELECT COALESCE(SUM(ThanhTien), 0) AS Tam FROM ChiTietDonHang
+          WHERE MaDon = @maDon AND TrangThaiCheBien <> 'DA_HUY') x
+    WHERE DonHang.MaDon = @maDon`, { maDon });
 }
 
 module.exports = {

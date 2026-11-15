@@ -41,9 +41,9 @@ const sessions = {
 };
 // Thông báo cho nhân viên (gọi phục vụ, món không thể chế biến) lưu trong bảng ThongBao
 async function ensureNotifyTable() {
-  await query(`IF OBJECT_ID('ThongBao') IS NULL CREATE TABLE ThongBao (
-    Id UNIQUEIDENTIFIER PRIMARY KEY, Loai NVARCHAR(50), NoiDung NVARCHAR(500), SoBan INT NULL,
-    ThoiGian DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME())`);
+  await query(`CREATE TABLE IF NOT EXISTS ThongBao (
+    Id UUID PRIMARY KEY, Loai VARCHAR(50), NoiDung VARCHAR(500), SoBan INT NULL,
+    ThoiGian TIMESTAMPTZ NOT NULL DEFAULT NOW())`);
 }
 let notifyReady = null;
 function notify(type, message, soBan) {
@@ -56,7 +56,7 @@ function notify(type, message, soBan) {
 async function recentNotifications() {
   notifyReady = notifyReady || ensureNotifyTable().catch((e) => { notifyReady = null; throw e; });
   await notifyReady;
-  const rows = await query('SELECT TOP 10 Id, Loai, NoiDung, SoBan, ThoiGian FROM ThongBao ORDER BY ThoiGian DESC');
+  const rows = await query('SELECT Id, Loai, NoiDung, SoBan, ThoiGian FROM ThongBao ORDER BY ThoiGian DESC LIMIT 10');
   return rows.map((r) => ({ id: r.Id, type: r.Loai, message: r.NoiDung, soBan: r.SoBan, time: new Date(r.ThoiGian).toISOString() }));
 }
 
@@ -107,10 +107,10 @@ app.get('/api/tables/:soBan', wrap(async (req, res) => {
 
 async function activeOrderId(run, soBan, lock = false) {
   const rows = await run(`
-    SELECT TOP 1 d.MaDon FROM DonHang d ${lock ? 'WITH (UPDLOCK, HOLDLOCK)' : ''}
+    SELECT d.MaDon FROM DonHang d
     JOIN BanAn b ON b.MaBan = d.MaBan
     WHERE b.SoBan = @s AND d.TrangThai NOT IN ('DA_THANH_TOAN', 'DA_HUY')
-    ORDER BY d.ThoiGianDat DESC`, { s: Number(soBan) || 0 });
+    ORDER BY d.ThoiGianDat DESC LIMIT 1 ${lock ? 'FOR UPDATE OF d' : ''}`, { s: Number(soBan) || 0 });
   return rows[0]?.MaDon || null;
 }
 
@@ -120,9 +120,9 @@ app.get('/api/tables/:soBan/order', wrap(async (req, res) => {
   if (maDon) return res.json({ order: await loadOrder(maDon) });
   // Không có đơn đang phục vụ: trả về đơn gần nhất trong 2 giờ (đã thanh toán / bị hủy) để hiển thị kết quả
   const [last] = await query(`
-    SELECT TOP 1 d.MaDon FROM DonHang d JOIN BanAn b ON b.MaBan = d.MaBan
-    WHERE b.SoBan = @s AND d.ThoiGianDat > DATEADD(HOUR, -2, GETDATE())
-    ORDER BY d.ThoiGianDat DESC`, { s: Number(req.params.soBan) || 0 });
+    SELECT d.MaDon FROM DonHang d JOIN BanAn b ON b.MaBan = d.MaBan
+    WHERE b.SoBan = @s AND d.ThoiGianDat > (NOW() AT TIME ZONE 'Asia/Ho_Chi_Minh') - INTERVAL '2 hours'
+    ORDER BY d.ThoiGianDat DESC LIMIT 1`, { s: Number(req.params.soBan) || 0 });
   res.json({ order: null, lastOrder: last ? await loadOrder(last.MaDon) : null });
 }));
 
@@ -130,7 +130,7 @@ app.get('/api/tables/:soBan/order', wrap(async (req, res) => {
 app.post('/api/orders', wrap(async (req, res) => {
   const { soBan, items } = req.body || {};
   const maDon = await transaction(async (run) => {
-    const [ban] = await run('SELECT MaBan FROM BanAn WITH (UPDLOCK) WHERE SoBan = @s', { s: Number(soBan) || 0 });
+    const [ban] = await run('SELECT MaBan FROM BanAn WHERE SoBan = @s FOR UPDATE', { s: Number(soBan) || 0 });
     if (!ban) throw new AppError(404, 'Không tìm thấy bàn');
 
     let ma = await activeOrderId(run, soBan, true);
@@ -143,8 +143,8 @@ app.post('/api/orders', wrap(async (req, res) => {
     const lines = await priceItems(items, { hasPizzaInOrder: hasPizza });
 
     if (!ma) {
-      const [{ next }] = await run(`SELECT ISNULL(MAX(CAST(SUBSTRING(MaDon, 3, 10) AS INT)), 0) + 1 AS next
-                                    FROM DonHang WITH (UPDLOCK, HOLDLOCK)`);
+      await run('LOCK TABLE DonHang IN SHARE ROW EXCLUSIVE MODE');
+      const [{ next }] = await run(`SELECT COALESCE(MAX(CAST(SUBSTRING(MaDon, 3, 10) AS INT)), 0) + 1 AS next FROM DonHang`);
       ma = 'DH' + String(next).padStart(6, '0');
       await run(`INSERT INTO DonHang (MaDon, MaBan, TrangThai) VALUES (@ma, @ban, 'CHO_CHE_BIEN')`, { ma, ban: ban.MaBan });
     } else {
@@ -155,8 +155,8 @@ app.post('/api/orders', wrap(async (req, res) => {
     for (const l of lines) {
       const [{ id }] = await run(`
         INSERT INTO ChiTietDonHang (MaDon, MaMon, MaVo, MaKT, SoLuong, DonGia, GhiChu)
-        VALUES (@ma, @maMon, @maVo, @maKT, @soLuong, @donGia, @ghiChu);
-        SELECT CAST(SCOPE_IDENTITY() AS INT) AS id;`,
+        VALUES (@ma, @maMon, @maVo, @maKT, @soLuong, @donGia, @ghiChu)
+        RETURNING MaCT AS id`,
       { ma, maMon: l.maMon, maVo: l.maVo, maKT: l.maKT, soLuong: l.soLuong, donGia: l.donGia, ghiChu: l.ghiChu });
       for (const t of l.thanhPhan) {
         await run('INSERT INTO ChiTiet_ThanhPhanThem (MaCT, MaTP, GiaThem) VALUES (@id, @tp, @gia)', { id, tp: t.maTP, gia: t.giaThem });
@@ -203,11 +203,12 @@ const sepayContent = (maDon) => `${SEPAY.prefix}${maDon}`;
 let sepaySchemaReady = null;
 function ensureSepaySchema() {
   sepaySchemaReady = sepaySchemaReady || query(`
-    IF EXISTS (SELECT 1 FROM sys.check_constraints WHERE name = 'CK_ThanhToan_HinhThuc' AND definition NOT LIKE '%SEPAY%')
-    BEGIN
-      ALTER TABLE ThanhToan DROP CONSTRAINT CK_ThanhToan_HinhThuc;
-      ALTER TABLE ThanhToan ADD CONSTRAINT CK_ThanhToan_HinhThuc CHECK (HinhThuc IN ('TIEN_MAT', 'THE', 'SEPAY'));
-    END`).catch((e) => { sepaySchemaReady = null; throw e; });
+    DO $$ BEGIN
+      IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ck_thanhtoan_hinhthuc' AND pg_get_constraintdef(oid) NOT LIKE '%SEPAY%') THEN
+        ALTER TABLE ThanhToan DROP CONSTRAINT CK_ThanhToan_HinhThuc;
+        ALTER TABLE ThanhToan ADD CONSTRAINT CK_ThanhToan_HinhThuc CHECK (HinhThuc IN ('TIEN_MAT', 'THE', 'SEPAY'));
+      END IF;
+    END $$`).catch((e) => { sepaySchemaReady = null; throw e; });
   return sepaySchemaReady;
 }
 
@@ -226,7 +227,7 @@ async function finalizePayment(run, o, { ht, tong, kd = null, thoi = null, the4 
 
 /** Kiểm tra đơn có thể thanh toán; trả về dòng DonHang */
 async function checkPayable(run, maDon, xacNhanChuaPhucVu) {
-  const [o] = await run('SELECT MaDon, MaBan, TrangThai, TongTien, ThueVAT FROM DonHang WITH (UPDLOCK) WHERE MaDon = @maDon', { maDon });
+  const [o] = await run('SELECT MaDon, MaBan, TrangThai, TongTien, ThueVAT FROM DonHang WHERE MaDon = @maDon FOR UPDATE', { maDon });
   if (!o) throw new AppError(404, 'Không tìm thấy đơn hàng');
   const paid = await run(`SELECT 1 AS x FROM ThanhToan WHERE MaDon = @maDon AND TrangThai = N'Thành công'`, { maDon });
   if (o.TrangThai === 'DA_THANH_TOAN' || paid.length) throw new AppError(409, 'Đơn hàng đã được thanh toán');
@@ -256,7 +257,7 @@ app.post('/api/sepay/webhook', wrap(async (req, res) => {
   if (SEPAY.apiKey && auth !== `Apikey ${SEPAY.apiKey}`) return res.status(401).json({ success: false });
   const t = req.body || {};
   if (t.transferType !== 'in') return res.json({ success: true, ignored: 'not incoming' });
-  const m = new RegExp(`${SEPAY.prefix}\s*(DH\d{6})`, 'i').exec(`${t.code || ''} ${t.content || ''} ${t.description || ''}`);
+  const m = new RegExp(`${SEPAY.prefix}\\s*(DH\\d{6})`, 'i').exec(`${t.code || ''} ${t.content || ''} ${t.description || ''}`);
   if (!m) return res.json({ success: true, ignored: 'no order code' });
   const maDon = m[1].toUpperCase();
   await ensureSepaySchema();
@@ -281,7 +282,7 @@ app.post('/api/orders/:maDon/pay', wrap(async (req, res) => {
   const maDon = req.params.maDon;
 
   await transaction(async (run) => {
-    const [o] = await run('SELECT MaDon, MaBan, TrangThai, TongTien, ThueVAT FROM DonHang WITH (UPDLOCK) WHERE MaDon = @maDon', { maDon });
+    const [o] = await run('SELECT MaDon, MaBan, TrangThai, TongTien, ThueVAT FROM DonHang WHERE MaDon = @maDon FOR UPDATE', { maDon });
     if (!o) throw new AppError(404, 'Không tìm thấy đơn hàng');
     const paid = await run(`SELECT 1 AS x FROM ThanhToan WHERE MaDon = @maDon AND TrangThai = N'Thành công'`, { maDon });
     if (o.TrangThai === 'DA_THANH_TOAN' || paid.length) throw new AppError(409, 'Đơn hàng đã được thanh toán');
@@ -341,8 +342,8 @@ app.get('/api/kitchen/orders', kitchen, wrap(async (req, res) => {
   for (const r of rows) orders.push(await loadOrder(r.MaDon));
   const [stats] = await query(`
     SELECT
-      (SELECT COUNT(*) FROM DonHang WHERE TrangThai IN ('DA_PHUC_VU', 'DA_THANH_TOAN') AND CAST(ThoiGianDat AS DATE) = CAST(GETDATE() AS DATE)) AS daXong,
-      (SELECT COUNT(*) FROM DonHang WHERE TrangThai = 'DA_HUY' AND CAST(ThoiGianDat AS DATE) = CAST(GETDATE() AS DATE)) AS daHuy`);
+      (SELECT COUNT(*) FROM DonHang WHERE TrangThai IN ('DA_PHUC_VU', 'DA_THANH_TOAN') AND CAST(ThoiGianDat AS DATE) = CAST(NOW() AT TIME ZONE 'Asia/Ho_Chi_Minh' AS DATE)) AS daXong,
+      (SELECT COUNT(*) FROM DonHang WHERE TrangThai = 'DA_HUY' AND CAST(ThoiGianDat AS DATE) = CAST(NOW() AT TIME ZONE 'Asia/Ho_Chi_Minh' AS DATE)) AS daHuy`);
   res.json({ orders, stats, notifications: await recentNotifications(), serverTime: new Date().toISOString() });
 }));
 
@@ -350,7 +351,7 @@ app.post('/api/kitchen/orders/:maDon/advance', kitchen, wrap(async (req, res) =>
   const maDon = req.params.maDon;
   const { from } = req.body || {};
   await transaction(async (run) => {
-    const [o] = await run('SELECT TrangThai FROM DonHang WITH (UPDLOCK) WHERE MaDon = @maDon', { maDon });
+    const [o] = await run('SELECT TrangThai FROM DonHang WHERE MaDon = @maDon FOR UPDATE', { maDon });
     if (!o) throw new AppError(404, 'Không tìm thấy đơn hàng');
     if (from && from !== o.TrangThai) throw new AppError(409, `Đơn đã được cập nhật sang "${STATUS_LABEL[o.TrangThai]}", vui lòng làm mới`);
     const idx = STATUS_FLOW.indexOf(o.TrangThai);
@@ -370,7 +371,7 @@ app.post('/api/kitchen/orders/:maDon/reject', kitchen, wrap(async (req, res) => 
   const note = `Không thể chế biến: ${lyDo}${ghiChu ? ' – ' + String(ghiChu).slice(0, 100) : ''}`.slice(0, 200);
   let soBan = null;
   await transaction(async (run) => {
-    const [o] = await run(`SELECT d.TrangThai, d.MaBan, b.SoBan FROM DonHang d WITH (UPDLOCK) JOIN BanAn b ON b.MaBan = d.MaBan WHERE d.MaDon = @maDon`, { maDon });
+    const [o] = await run(`SELECT d.TrangThai, d.MaBan, b.SoBan FROM DonHang d JOIN BanAn b ON b.MaBan = d.MaBan WHERE d.MaDon = @maDon FOR UPDATE OF d`, { maDon });
     if (!o) throw new AppError(404, 'Không tìm thấy đơn hàng');
     if (['DA_THANH_TOAN', 'DA_HUY'].includes(o.TrangThai)) throw new AppError(400, 'Đơn hàng đã kết thúc');
     soBan = o.SoBan;
@@ -440,7 +441,7 @@ function validateDish(body) {
 }
 
 async function assertUniqueName(run, tenMon, exceptMa = '') {
-  const dup = await run('SELECT MaMon FROM MonAn WHERE LOWER(TenMon) = LOWER(@t) AND MaMon <> @m', { t: tenMon, m: exceptMa });
+  const dup = await run('SELECT MaMon FROM MonAn WHERE LOWER(TenMon) = LOWER(CAST(@t AS VARCHAR)) AND MaMon <> @m', { t: tenMon, m: exceptMa });
   if (dup.length) throw new AppError(409, 'Món đã tồn tại', 'NAME');
 }
 
@@ -449,18 +450,19 @@ app.post('/api/admin/dishes', manager, wrap(async (req, res) => {
   const maMon = await transaction(async (run) => {
     await assertUniqueName(run, d.tenMon);
     const prefix = d.loaiMon === 'PIZZA' ? 'PZ' : 'NU';
-    const [{ next }] = await run(`SELECT ISNULL(MAX(CAST(SUBSTRING(MaMon, 3, 8) AS INT)), 0) + 1 AS next
-                                  FROM MonAn WITH (UPDLOCK, HOLDLOCK) WHERE MaMon LIKE @p`, { p: prefix + '%' });
+    await run('LOCK TABLE MonAn IN SHARE ROW EXCLUSIVE MODE');
+    const [{ next }] = await run(`SELECT COALESCE(MAX(CAST(SUBSTRING(MaMon, 3, 8) AS INT)), 0) + 1 AS next
+                                  FROM MonAn WHERE MaMon LIKE @p`, { p: prefix + '%' });
     const ma = prefix + String(next).padStart(2, '0');
     await run(`INSERT INTO MonAn (MaMon, TenMon, LoaiMon, MoTa, HinhAnh, DangBan) VALUES (@ma, @t, @l, @mt, @ha, @db)`,
       { ma, t: d.tenMon, l: d.loaiMon, mt: d.moTa, ha: d.hinhAnh, db: d.dangBan });
     if (d.loaiMon === 'PIZZA') {
       await run('INSERT INTO BanhPizza (MaMon, LoaiBanh) VALUES (@ma, @lb)', { ma, lb: d.loaiBanh });
       for (const kt of ['S', 'M', 'L']) {
-        await run('INSERT INTO GiaTheoKichThuoc (MaMon, MaKT, NgayApDung, GiaBan) VALUES (@ma, @kt, CAST(GETDATE() AS DATE), @g)', { ma, kt, g: d.gia[kt] });
+        await run(`INSERT INTO GiaTheoKichThuoc (MaMon, MaKT, NgayApDung, GiaBan) VALUES (@ma, @kt, CAST(NOW() AT TIME ZONE 'Asia/Ho_Chi_Minh' AS DATE), @g)`, { ma, kt, g: d.gia[kt] });
       }
       const tps = new Set(['TP06', ...d.thanhPhan]);
-      for (const tp of tps) await run('INSERT INTO BanhPizza_ThanhPhan (MaMon, MaTP) SELECT @ma, MaTP FROM ThanhPhan WHERE MaTP = @tp', { ma, tp });
+      for (const tp of tps) await run('INSERT INTO BanhPizza_ThanhPhan (MaMon, MaTP) SELECT CAST(@ma AS VARCHAR), MaTP FROM ThanhPhan WHERE MaTP = @tp', { ma, tp });
     } else {
       await run('INSERT INTO NuocUong (MaMon, DonGia, DungTich) VALUES (@ma, @g, @dt)', { ma, g: d.donGia, dt: d.dungTich });
     }
@@ -473,7 +475,7 @@ app.put('/api/admin/dishes/:ma', manager, wrap(async (req, res) => {
   const ma = req.params.ma;
   const d = validateDish(req.body || {});
   await transaction(async (run) => {
-    const [cur] = await run('SELECT LoaiMon FROM MonAn WITH (UPDLOCK) WHERE MaMon = @ma', { ma });
+    const [cur] = await run('SELECT LoaiMon FROM MonAn WHERE MaMon = @ma FOR UPDATE', { ma });
     if (!cur) throw new AppError(404, 'Không tìm thấy món');
     if (cur.LoaiMon !== d.loaiMon) throw new AppError(400, 'Không thể đổi loại món (Pizza / Nước uống)');
     await assertUniqueName(run, d.tenMon, ma);
@@ -483,15 +485,12 @@ app.put('/api/admin/dishes/:ma', manager, wrap(async (req, res) => {
       await run('UPDATE BanhPizza SET LoaiBanh = @lb WHERE MaMon = @ma', { ma, lb: d.loaiBanh });
       // Giá mới được lưu thành một dòng mới (lịch sử giá); đơn đã xác nhận giữ nguyên giá cũ
       for (const kt of ['S', 'M', 'L']) {
-        await run(`
-          DECLARE @cur DECIMAL(12,0) = (SELECT TOP 1 GiaBan FROM GiaTheoKichThuoc WHERE MaMon = @ma AND MaKT = @kt AND NgayApDung <= CAST(GETDATE() AS DATE) ORDER BY NgayApDung DESC);
-          IF @cur IS NULL OR @cur <> @g
-          BEGIN
-            IF EXISTS (SELECT 1 FROM GiaTheoKichThuoc WHERE MaMon = @ma AND MaKT = @kt AND NgayApDung = CAST(GETDATE() AS DATE))
-              UPDATE GiaTheoKichThuoc SET GiaBan = @g WHERE MaMon = @ma AND MaKT = @kt AND NgayApDung = CAST(GETDATE() AS DATE);
-            ELSE
-              INSERT INTO GiaTheoKichThuoc (MaMon, MaKT, NgayApDung, GiaBan) VALUES (@ma, @kt, CAST(GETDATE() AS DATE), @g);
-          END`, { ma, kt, g: d.gia[kt] });
+        const [cur] = await run(`SELECT GiaBan FROM GiaTheoKichThuoc WHERE MaMon = @ma AND MaKT = @kt AND NgayApDung <= CAST(NOW() AT TIME ZONE 'Asia/Ho_Chi_Minh' AS DATE)
+                                 ORDER BY NgayApDung DESC LIMIT 1`, { ma, kt });
+        if (!cur || Number(cur.GiaBan) !== d.gia[kt]) {
+          await run(`INSERT INTO GiaTheoKichThuoc (MaMon, MaKT, NgayApDung, GiaBan) VALUES (@ma, @kt, CAST(NOW() AT TIME ZONE 'Asia/Ho_Chi_Minh' AS DATE), @g)
+                     ON CONFLICT (MaMon, MaKT, NgayApDung) DO UPDATE SET GiaBan = EXCLUDED.GiaBan`, { ma, kt, g: d.gia[kt] });
+        }
       }
     } else {
       await run('UPDATE NuocUong SET DonGia = @g, DungTich = @dt WHERE MaMon = @ma', { ma, g: d.donGia, dt: d.dungTich });
@@ -501,16 +500,16 @@ app.put('/api/admin/dishes/:ma', manager, wrap(async (req, res) => {
 }));
 
 app.patch('/api/admin/dishes/:ma/status', manager, wrap(async (req, res) => {
-  const r = await query('UPDATE MonAn SET DangBan = @db WHERE MaMon = @ma; SELECT @@ROWCOUNT AS n', { ma: req.params.ma, db: req.body?.dangBan ? 1 : 0 });
+  const r = await query('UPDATE MonAn SET DangBan = @db WHERE MaMon = @ma RETURNING 1 AS n', { ma: req.params.ma, db: req.body?.dangBan ? 1 : 0 });
   if (!r[0]?.n) throw new AppError(404, 'Không tìm thấy món');
   res.json({ message: req.body?.dangBan ? 'Món đã được mở bán' : 'Món đã chuyển sang Ngừng bán' });
 }));
 
 app.delete('/api/admin/dishes/:ma', manager, wrap(async (req, res) => {
   const ma = req.params.ma;
-  const used = await query('SELECT TOP 1 1 AS x FROM ChiTietDonHang WHERE MaMon = @ma', { ma });
+  const used = await query('SELECT 1 AS x FROM ChiTietDonHang WHERE MaMon = @ma LIMIT 1', { ma });
   if (used.length) throw new AppError(409, 'Món đã có trong đơn hàng nên không thể xóa, chỉ có thể chuyển sang "Ngừng bán"');
-  const r = await query('DELETE FROM MonAn WHERE MaMon = @ma; SELECT @@ROWCOUNT AS n', { ma });
+  const r = await query('DELETE FROM MonAn WHERE MaMon = @ma RETURNING 1 AS n', { ma });
   if (!r[0]?.n) throw new AppError(404, 'Không tìm thấy món');
   res.json({ message: 'Đã xóa món' });
 }));
@@ -536,21 +535,21 @@ function reportParams(q) {
 }
 
 async function buildReport({ tuNgay, denNgay, hinhThuc }) {
-  const where = `t.TrangThai = N'Thành công' AND CAST(t.ThoiGian AS DATE) BETWEEN @tu AND @den
+  const where = `t.TrangThai = N'Thành công' AND CAST(t.ThoiGian AS DATE) BETWEEN CAST(@tu AS DATE) AND CAST(@den AS DATE)
                  ${hinhThuc ? 'AND t.HinhThuc = @ht' : ''}`;
   const p = { tu: tuNgay, den: denNgay, ht: hinhThuc || '' };
-  const [sum] = await query(`SELECT ISNULL(SUM(t.SoTien), 0) AS tong, COUNT(*) AS soDon FROM ThanhToan t WHERE ${where}`, p);
+  const [sum] = await query(`SELECT COALESCE(SUM(t.SoTien), 0) AS tong, COUNT(*) AS soDon FROM ThanhToan t WHERE ${where}`, p);
   const days = Math.round((new Date(denNgay) - new Date(tuNgay)) / 86400000) + 1;
-  const [prev] = await query(`SELECT ISNULL(SUM(t.SoTien), 0) AS tong FROM ThanhToan t
-     WHERE t.TrangThai = N'Thành công' AND CAST(t.ThoiGian AS DATE) BETWEEN DATEADD(DAY, -@n, CAST(@tu AS DATE)) AND DATEADD(DAY, -1, CAST(@tu AS DATE))
+  const [prev] = await query(`SELECT COALESCE(SUM(t.SoTien), 0) AS tong FROM ThanhToan t
+     WHERE t.TrangThai = N'Thành công' AND CAST(t.ThoiGian AS DATE) BETWEEN CAST(@tu AS DATE) - CAST(@n AS INT) AND CAST(@tu AS DATE) - 1
      ${hinhThuc ? 'AND t.HinhThuc = @ht' : ''}`, { ...p, n: days });
-  const byDay = await query(`SELECT CONVERT(VARCHAR(10), CAST(t.ThoiGian AS DATE), 23) AS ngay, SUM(t.SoTien) AS tong, COUNT(*) AS soDon
+  const byDay = await query(`SELECT TO_CHAR(CAST(t.ThoiGian AS DATE), 'YYYY-MM-DD') AS ngay, SUM(t.SoTien) AS tong, COUNT(*) AS soDon
                              FROM ThanhToan t WHERE ${where} GROUP BY CAST(t.ThoiGian AS DATE) ORDER BY ngay`, p);
   const byMethod = await query(`SELECT t.HinhThuc, SUM(t.SoTien) AS tong, COUNT(*) AS soDon FROM ThanhToan t WHERE ${where} GROUP BY t.HinhThuc`, p);
-  const top = await query(`SELECT TOP 5 m.MaMon, m.TenMon, m.HinhAnh, m.LoaiMon, SUM(c.SoLuong) AS soLuong, SUM(c.ThanhTien) AS doanhThu
+  const top = await query(`SELECT m.MaMon, m.TenMon, m.HinhAnh, m.LoaiMon, SUM(c.SoLuong) AS soLuong, SUM(c.ThanhTien) AS doanhThu
                            FROM ThanhToan t JOIN ChiTietDonHang c ON c.MaDon = t.MaDon JOIN MonAn m ON m.MaMon = c.MaMon
                            WHERE ${where} AND c.TrangThaiCheBien <> 'DA_HUY'
-                           GROUP BY m.MaMon, m.TenMon, m.HinhAnh, m.LoaiMon ORDER BY SUM(c.ThanhTien) DESC`, p);
+                           GROUP BY m.MaMon, m.TenMon, m.HinhAnh, m.LoaiMon ORDER BY SUM(c.ThanhTien) DESC LIMIT 5`, p);
 
   // Đủ các ngày trong khoảng (ngày không có doanh thu = 0)
   const series = [];
