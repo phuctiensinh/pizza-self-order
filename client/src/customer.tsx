@@ -467,7 +467,8 @@ function TrackingScreen({ ctx }: { ctx: Ctx }) {
 /* ====================== Thanh toán đơn hàng ====================== */
 function PaymentScreen({ ctx }: { ctx: Ctx }) {
   const { order, soBan, refreshOrder } = ctx;
-  const [method, setMethod] = useState<"TIEN_MAT" | "THE" | "">("");
+  const [method, setMethod] = useState<"TIEN_MAT" | "THE" | "SEPAY" | "">("");
+  const [qr, setQr] = useState<{ qrUrl: string; soTien: number; noiDung: string; nganHang: string; soTaiKhoan: string; chuTaiKhoan: string } | null>(null);
   const [cash, setCash] = useState("");
   const [card, setCard] = useState({ so: "", han: "", cvv: "" });
   const [status, setStatus] = useState<{ tone: "error" | "success"; title: string; text?: string } | null>(null);
@@ -475,6 +476,22 @@ function PaymentScreen({ ctx }: { ctx: Ctx }) {
   const [paid, setPaid] = useState<Order | null>(null);
   const [warnUnserved, setWarnUnserved] = useState(false);
   const confirmed = useMemo(() => new URLSearchParams(window.location.hash.split("?")[1] || "").get("xacnhan") === "1", []);
+
+  // Chờ SePay báo đã nhận tiền (webhook) – kiểm tra trạng thái đơn mỗi 3 giây
+  useEffect(() => {
+    if (method !== "SEPAY" || !qr || paid || !order) return;
+    const t = setInterval(async () => {
+      try {
+        const r = await api<{ order: Order }>(`/api/orders/${order.maDon}`);
+        if (r.order?.thanhToan) {
+          setPaid(r.order);
+          setStatus({ tone: "success", title: "Đã nhận chuyển khoản", text: "Cảm ơn quý khách. Hẹn gặp lại!" });
+          refreshOrder();
+        }
+      } catch { /* thử lại lần sau */ }
+    }, 3000);
+    return () => clearInterval(t);
+  }, [method, qr, paid, order, refreshOrder]);
 
   const o = paid || order;
   if (!o) {
@@ -488,6 +505,15 @@ function PaymentScreen({ ctx }: { ctx: Ctx }) {
   const pay = async (force = false) => {
     if (!method) { setStatus({ tone: "error", title: "Vui lòng chọn hình thức thanh toán" }); return; }
     setBusy(true); setStatus(null);
+    if (method === "SEPAY") {
+      try {
+        setQr(await api(`/api/orders/${o.maDon}/sepay`, { method: "POST", body: { xacNhanChuaPhucVu: force || confirmed } }));
+      } catch (e) {
+        if (e instanceof ApiError && e.code === "UNSERVED") setWarnUnserved(true);
+        else setStatus({ tone: "error", title: e instanceof ApiError && e.status ? e.message : "Không tạo được mã QR", text: "Vui lòng thử lại hoặc đổi hình thức thanh toán." });
+      } finally { setBusy(false); }
+      return;
+    }
     try {
       const r = await api<{ message: string; order: Order }>(`/api/orders/${o.maDon}/pay`, {
         method: "POST",
@@ -516,8 +542,8 @@ function PaymentScreen({ ctx }: { ctx: Ctx }) {
           <div className="invoice-items">{items.map((i) => <div key={i.maCT}><span><b>{i.soLuong} ×</b> {i.tenMon}<small>{[i.vo && `Vỏ ${i.vo.toLowerCase()}`, i.kichThuoc && `Cỡ ${i.kichThuoc.toLowerCase()}`, i.thanhPhanThem.join(", ")].filter(Boolean).join(" · ") || i.ghiChu || " "}</small></span><strong>{money(i.thanhTien)}</strong></div>)}</div>
           <div className="summary-lines"><p><span>Tạm tính</span><b>{money(o.tamTinh)}</b></p><p><span>VAT (8%)</span><b>{money(o.thueVAT)}</b></p></div>
           <div className="invoice-total"><span>Tổng thanh toán</span><strong>{money(total)}</strong></div>
-          {paid?.thanhToan && <div className="summary-lines paid-lines"><p><span>Hình thức</span><b>{paid.thanhToan.hinhThuc === "THE" ? `Thẻ tín dụng •••• ${paid.thanhToan.soTheRutGon}` : "Tiền mặt"}</b></p>{paid.thanhToan.tienKhachDua != null && <><p><span>Tiền khách đưa</span><b>{money(paid.thanhToan.tienKhachDua)}</b></p><p><span>Tiền thối</span><b>{money(paid.thanhToan.tienThoi || 0)}</b></p></>}</div>}
-          <div className="secure-note"><Icon name="check" /><span>Thông tin thẻ không được lưu trữ – kết nối được mã hóa</span></div>
+          {paid?.thanhToan && <div className="summary-lines paid-lines"><p><span>Hình thức</span><b>{paid.thanhToan.hinhThuc === "THE" ? `Thẻ tín dụng •••• ${paid.thanhToan.soTheRutGon}` : paid.thanhToan.hinhThuc === "SEPAY" ? "Chuyển khoản QR (SePay)" : "Tiền mặt"}</b></p>{paid.thanhToan.tienKhachDua != null && <><p><span>Tiền khách đưa</span><b>{money(paid.thanhToan.tienKhachDua)}</b></p><p><span>Tiền thối</span><b>{money(paid.thanhToan.tienThoi || 0)}</b></p></>}</div>}
+          <div className="secure-note"><Icon name="check" /><span>Thông tin thẻ không được lưu trữ – chuyển khoản QR được xác nhận tự động qua SePay</span></div>
         </section>
         <section className="payment-method no-print">
           {paid ? (
@@ -532,6 +558,7 @@ function PaymentScreen({ ctx }: { ctx: Ctx }) {
               <div className="payment-tabs">
                 <button className={method === "TIEN_MAT" ? "active" : ""} onClick={() => { setMethod("TIEN_MAT"); setStatus(null); }}><Icon name="cash" /><span><b>Tiền mặt</b><small>Nhân viên thu tại bàn</small></span></button>
                 <button className={method === "THE" ? "active" : ""} onClick={() => { setMethod("THE"); setStatus(null); }}><Icon name="card" /><span><b>Thẻ tín dụng</b><small>Visa, Mastercard, JCB</small></span></button>
+                <button className={method === "SEPAY" ? "active" : ""} onClick={() => { setMethod("SEPAY"); setStatus(null); }}><Icon name="card" /><span><b>Chuyển khoản QR</b><small>Quét mã bằng app ngân hàng</small></span></button>
               </div>
               {status && <Alert tone={status.tone} title={status.title}>{status.text}</Alert>}
               {method === "TIEN_MAT" && (
@@ -551,7 +578,20 @@ function PaymentScreen({ ctx }: { ctx: Ctx }) {
                   <p className="card-hint">Có thể quẹt hoặc chạm thẻ vào đầu đọc tại bàn. Hệ thống chỉ lưu 4 số cuối của thẻ.</p>
                 </div>
               )}
-              <Button className="wide payment-submit" onClick={() => pay()} icon="arrow" loading={busy}>Thanh toán {money(total)}</Button>
+              {method === "SEPAY" && qr && (
+                <div className="payment-form sepay-box">
+                  <img src={qr.qrUrl} alt="Mã QR chuyển khoản" className="sepay-qr" />
+                  <div className="summary-lines">
+                    <p><span>Ngân hàng</span><b>{qr.nganHang}</b></p>
+                    <p><span>Số tài khoản</span><b>{qr.soTaiKhoan}</b></p>
+                    {qr.chuTaiKhoan && <p><span>Chủ tài khoản</span><b>{qr.chuTaiKhoan}</b></p>}
+                    <p><span>Số tiền</span><b>{money(qr.soTien)}</b></p>
+                    <p><span>Nội dung</span><b>{qr.noiDung}</b></p>
+                  </div>
+                  <p className="card-hint">Mở ứng dụng ngân hàng và quét mã. Giữ nguyên nội dung chuyển khoản – hệ thống sẽ tự xác nhận khi nhận được tiền.</p>
+                </div>
+              )}
+              {!(method === "SEPAY" && qr) && <Button className="wide payment-submit" onClick={() => pay()} icon="arrow" loading={busy}>{method === "SEPAY" ? `Tạo mã QR ${money(total)}` : `Thanh toán ${money(total)}`}</Button>}
             </>
           )}
         </section>

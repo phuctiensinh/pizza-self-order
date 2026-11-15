@@ -178,7 +178,7 @@ export function KitchenScreen() {
   const bell = (
     <div className="bell-wrap">
       <button className="notification" onClick={() => setShowNotes(!showNotes)} aria-label="Thông báo"><Icon name="bell" size={18} />{notes.length > 0 && <i>{notes.length}</i>}</button>
-      {showNotes && <div className="notes-pop">{notes.length ? notes.map((n) => <div key={n.id}><Badge tone={n.type === "CALL" ? "warning" : "danger"}>{n.type === "CALL" ? "Gọi phục vụ" : "Không chế biến"}</Badge><p>{n.message}</p><small>{new Date(n.time).toLocaleTimeString("vi-VN")}</small></div>) : <p className="muted">Chưa có thông báo</p>}</div>}
+      {showNotes && <div className="notes-pop">{notes.length ? notes.map((n) => <div key={n.id}><Badge tone={n.type === "CALL" ? "warning" : n.type === "PAID" ? "success" : "danger"}>{n.type === "CALL" ? "Gọi phục vụ" : n.type === "PAID" ? "Đã chuyển khoản" : "Không chế biến"}</Badge><p>{n.message}</p><small>{new Date(n.time).toLocaleTimeString("vi-VN")}</small></div>) : <p className="muted">Chưa có thông báo</p>}</div>}
     </div>
   );
 
@@ -487,7 +487,10 @@ export function ReportScreen() {
   const top = Math.ceil(max / 1e6) * 1e6 || 1e6;
   const cash = report?.theoHinhThuc.find((m) => m.hinhThuc === "TIEN_MAT");
   const card = report?.theoHinhThuc.find((m) => m.hinhThuc === "THE");
-  const cashPct = report && report.tongDoanhThu ? ((cash?.tong || 0) / report.tongDoanhThu) * 100 : 0;
+  const sepay = report?.theoHinhThuc.find((m) => m.hinhThuc === "SEPAY");
+  const pctOf = (m?: { tong: number }) => (report && report.tongDoanhThu ? ((m?.tong || 0) / report.tongDoanhThu) * 100 : 0);
+  const cashPct = pctOf(cash);
+  const cardPct = pctOf(card);
   const best = report?.monBanChay.find((m) => m.loaiMon === "PIZZA") || report?.monBanChay[0];
   const fmtD = (s: string) => s.split("-").reverse().slice(0, 2).join("/");
   const many = (report?.theoNgay.length || 0) > 16;
@@ -500,7 +503,7 @@ export function ReportScreen() {
         <section className="report-filters no-print">
           <label className="field"><span>Từ ngày</span><input type="date" value={tu} onChange={(e) => setTu(e.target.value)} /></label>
           <label className="field"><span>Đến ngày</span><input type="date" value={den} onChange={(e) => setDen(e.target.value)} /></label>
-          <label className="field"><span>Hình thức thanh toán</span><select value={ht} onChange={(e) => setHt(e.target.value)}><option value="ALL">Tất cả hình thức</option><option value="TIEN_MAT">Tiền mặt</option><option value="THE">Thẻ tín dụng</option></select></label>
+          <label className="field"><span>Hình thức thanh toán</span><select value={ht} onChange={(e) => setHt(e.target.value)}><option value="ALL">Tất cả hình thức</option><option value="TIEN_MAT">Tiền mặt</option><option value="THE">Thẻ tín dụng</option><option value="SEPAY">Chuyển khoản QR</option></select></label>
           <Button onClick={load} loading={busy}>Xem báo cáo</Button>
         </section>
         {error && <div className="report-alert"><Alert tone="error" title={error} /></div>}
@@ -530,10 +533,11 @@ export function ReportScreen() {
               </div>
               <div className="chart-card donut-card">
                 <div className="chart-title"><div><h2>Hình thức thanh toán</h2><p>Tỷ trọng theo doanh thu</p></div></div>
-                <div className="donut-wrap"><div className="donut" style={{ background: `conic-gradient(var(--red) 0 ${cashPct}%, var(--yellow) ${cashPct}% 100%)` }}><div><strong>{short(report.tongDoanhThu)}</strong><small>Tổng</small></div></div></div>
+                <div className="donut-wrap"><div className="donut" style={{ background: `conic-gradient(var(--red) 0 ${cashPct}%, var(--yellow) ${cashPct}% ${cashPct + cardPct}%, var(--green) ${cashPct + cardPct}% 100%)` }}><div><strong>{short(report.tongDoanhThu)}</strong><small>Tổng</small></div></div></div>
                 <div className="donut-legend">
                   <div><span className="legend-dot cash" /><span>Tiền mặt<small>{cash?.soDon || 0} đơn</small></span><b>{cashPct.toFixed(1)}%</b></div>
-                  <div><span className="legend-dot credit" /><span>Thẻ tín dụng<small>{card?.soDon || 0} đơn</small></span><b>{(report.tongDoanhThu ? 100 - cashPct : 0).toFixed(1)}%</b></div>
+                  <div><span className="legend-dot credit" /><span>Thẻ tín dụng<small>{card?.soDon || 0} đơn</small></span><b>{cardPct.toFixed(1)}%</b></div>
+                  <div><span className="legend-dot sepay" /><span>Chuyển khoản QR<small>{sepay?.soDon || 0} đơn</small></span><b>{pctOf(sepay).toFixed(1)}%</b></div>
                 </div>
               </div>
             </section>

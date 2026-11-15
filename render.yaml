@@ -22,3 +22,11 @@ services:
         sync: false
       - key: DB_PASSWORD
         sync: false
+      - key: SEPAY_BANK
+        sync: false
+      - key: SEPAY_ACCOUNT
+        sync: false
+      - key: SEPAY_ACCOUNT_NAME
+        sync: false
+      - key: SEPAY_API_KEY
+        sync: false

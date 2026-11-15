@@ -92,3 +92,15 @@ pizza-self-order/
    ├─ ui.tsx, api.ts, store.ts
    └─ index.css             Hệ thống thiết kế (từ Figma)
 ```
+
+## Thanh toán chuyển khoản QR (SePay)
+
+Ngoài tiền mặt và thẻ, khách có thể chọn **Chuyển khoản QR**:
+
+1. Màn hình tại bàn gọi `POST /api/orders/<mã đơn>/sepay`, máy chủ trả về ảnh VietQR (qr.sepay.vn) kèm số tiền và nội dung `PZ<mã đơn>` (ví dụ `PZDH000123`).
+2. Khách quét mã bằng ứng dụng ngân hàng và chuyển tiền.
+3. SePay gọi webhook `POST /api/sepay/webhook` (header `Authorization: Apikey <SEPAY_API_KEY>`). Máy chủ đọc mã đơn trong nội dung, kiểm tra số tiền, ghi `ThanhToan`/`HoaDon` với hình thức `SEPAY` và giải phóng bàn.
+4. Màn hình tại bàn kiểm tra trạng thái đơn mỗi 3 giây và hiện hóa đơn khi đã nhận tiền.
+
+Biến môi trường: `SEPAY_BANK` (ví dụ `MBBank`), `SEPAY_ACCOUNT`, `SEPAY_ACCOUNT_NAME`, `SEPAY_API_KEY`, `SEPAY_PREFIX` (mặc định `PZ`).
+Trên my.sepay.vn: liên kết tài khoản ngân hàng, tạo webhook trỏ tới `https://<tên miền>/api/sepay/webhook`, kiểu xác thực API Key.

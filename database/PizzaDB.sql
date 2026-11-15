@@ -188,7 +188,7 @@ CREATE TABLE ThanhToan (
     CONSTRAINT UQ_ThanhToan_MaDon UNIQUE (MaDon),
     CONSTRAINT FK_ThanhToan_MaDon FOREIGN KEY (MaDon) REFERENCES DonHang(MaDon),
     CONSTRAINT FK_ThanhToan_MaNVThuNgan FOREIGN KEY (MaNVThuNgan) REFERENCES NhanVien(MaNV),
-    CONSTRAINT CK_ThanhToan_HinhThuc CHECK (HinhThuc IN ('TIEN_MAT', 'THE')),
+    CONSTRAINT CK_ThanhToan_HinhThuc CHECK (HinhThuc IN ('TIEN_MAT', 'THE', 'SEPAY')),
     CONSTRAINT CK_ThanhToan_SoTien CHECK (SoTien > 0),
     CONSTRAINT CK_ThanhToan_TrangThai CHECK (TrangThai IN (N'Đang xử lý', N'Thành công', N'Thất bại'))
 );

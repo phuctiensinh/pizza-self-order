@@ -212,3 +212,10 @@
 .product-ranking .mini-progress { grid-column: 2 / 4; }
 .product-ranking > div > strong { margin-top: 0 !important; grid-column: 2 / 4; text-align: right; }
 .toast-stack { left: auto; right: 24px; top: 88px; bottom: auto; transform: none; align-items: flex-end; }
+
+/* Thanh toán chuyển khoản QR (SePay) */
+.payment-tabs { grid-template-columns: repeat(3, 1fr); }
+.sepay-box { display: flex; flex-direction: column; align-items: center; gap: 10px; }
+.sepay-qr { width: 220px; max-width: 100%; aspect-ratio: 1; border: 1px solid var(--border); border-radius: 12px; background: white; }
+.sepay-box .summary-lines { width: 100%; }
+.legend-dot.sepay { background: var(--green); }

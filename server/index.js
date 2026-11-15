@@ -187,6 +187,94 @@ function luhn(num) {
   return sum % 10 === 0;
 }
 
+/* ------------------------------------------------------------------ */
+/* Thanh toán chuyển khoản qua SePay (VietQR + webhook)                */
+/* ------------------------------------------------------------------ */
+const SEPAY = {
+  bank: process.env.SEPAY_BANK || 'MBBank',
+  account: process.env.SEPAY_ACCOUNT || '',
+  accountName: process.env.SEPAY_ACCOUNT_NAME || '',
+  apiKey: process.env.SEPAY_API_KEY || '',
+  prefix: (process.env.SEPAY_PREFIX || 'PZ').toUpperCase(),
+};
+const sepayContent = (maDon) => `${SEPAY.prefix}${maDon}`;
+
+// Cho phép giá trị 'SEPAY' trong cột HinhThuc / HinhThucTT (CSDL tạo trước khi có SePay)
+let sepaySchemaReady = null;
+function ensureSepaySchema() {
+  sepaySchemaReady = sepaySchemaReady || query(`
+    IF EXISTS (SELECT 1 FROM sys.check_constraints WHERE name = 'CK_ThanhToan_HinhThuc' AND definition NOT LIKE '%SEPAY%')
+    BEGIN
+      ALTER TABLE ThanhToan DROP CONSTRAINT CK_ThanhToan_HinhThuc;
+      ALTER TABLE ThanhToan ADD CONSTRAINT CK_ThanhToan_HinhThuc CHECK (HinhThuc IN ('TIEN_MAT', 'THE', 'SEPAY'));
+    END`).catch((e) => { sepaySchemaReady = null; throw e; });
+  return sepaySchemaReady;
+}
+
+/** Ghi nhận thanh toán thành công: ThanhToan + HoaDon, cập nhật đơn và bàn */
+async function finalizePayment(run, o, { ht, tong, kd = null, thoi = null, the4 = null, gd = null }) {
+  const so = o.MaDon.slice(2);
+  await run(`INSERT INTO ThanhToan (MaTT, MaDon, HinhThuc, SoTien, TrangThai, TienKhachDua, TienThoi, SoTheRutGon, MaGiaoDich)
+             VALUES (@tt, @maDon, @ht, @tong, N'Thành công', @kd, @thoi, @the4, @gd)`,
+  { tt: 'TT' + so, maDon: o.MaDon, ht, tong, kd, thoi, the4, gd });
+  await run(`INSERT INTO HoaDon (MaHD, MaTT, ThueVAT, TongTien, HinhThucTT) VALUES (@hd, @tt, @vat, @tong, @ht)`,
+    { hd: 'HD' + so, tt: 'TT' + so, vat: Number(o.ThueVAT), tong, ht });
+  await run(`UPDATE DonHang SET TrangThai = 'DA_THANH_TOAN' WHERE MaDon = @maDon`, { maDon: o.MaDon });
+  await run(`UPDATE ChiTietDonHang SET TrangThaiCheBien = 'DA_PHUC_VU' WHERE MaDon = @maDon AND TrangThaiCheBien NOT IN ('DA_HUY')`, { maDon: o.MaDon });
+  await run(`UPDATE BanAn SET TrangThai = N'Trống' WHERE MaBan = @b`, { b: o.MaBan });
+}
+
+/** Kiểm tra đơn có thể thanh toán; trả về dòng DonHang */
+async function checkPayable(run, maDon, xacNhanChuaPhucVu) {
+  const [o] = await run('SELECT MaDon, MaBan, TrangThai, TongTien, ThueVAT FROM DonHang WITH (UPDLOCK) WHERE MaDon = @maDon', { maDon });
+  if (!o) throw new AppError(404, 'Không tìm thấy đơn hàng');
+  const paid = await run(`SELECT 1 AS x FROM ThanhToan WHERE MaDon = @maDon AND TrangThai = N'Thành công'`, { maDon });
+  if (o.TrangThai === 'DA_THANH_TOAN' || paid.length) throw new AppError(409, 'Đơn hàng đã được thanh toán');
+  if (o.TrangThai === 'DA_HUY') throw new AppError(400, 'Đơn hàng đã bị hủy');
+  if (Number(o.TongTien) <= 0) throw new AppError(400, 'Đơn hàng không có món cần thanh toán');
+  const pending = await run(`SELECT COUNT(*) AS n FROM ChiTietDonHang WHERE MaDon = @maDon
+                             AND TrangThaiCheBien NOT IN ('DA_PHUC_VU', 'DA_HUY')`, { maDon });
+  if (pending[0].n > 0 && !xacNhanChuaPhucVu) throw new AppError(409, 'Còn món chưa được phục vụ', 'UNSERVED');
+  return o;
+}
+
+// Tạo mã QR chuyển khoản cho đơn hàng
+app.post('/api/orders/:maDon/sepay', wrap(async (req, res) => {
+  if (!SEPAY.account) throw new AppError(503, 'Chưa cấu hình tài khoản nhận tiền SePay', 'SEPAY_OFF');
+  const maDon = req.params.maDon;
+  const o = await transaction((run) => checkPayable(run, maDon, req.body?.xacNhanChuaPhucVu));
+  const soTien = Number(o.TongTien);
+  const noiDung = sepayContent(maDon);
+  const qrUrl = `https://qr.sepay.vn/img?acc=${encodeURIComponent(SEPAY.account)}&bank=${encodeURIComponent(SEPAY.bank)}`
+    + `&amount=${soTien}&des=${encodeURIComponent(noiDung)}&template=compact`;
+  res.json({ qrUrl, soTien, noiDung, nganHang: SEPAY.bank, soTaiKhoan: SEPAY.account, chuTaiKhoan: SEPAY.accountName });
+}));
+
+// Webhook SePay gọi khi tài khoản nhận được tiền
+app.post('/api/sepay/webhook', wrap(async (req, res) => {
+  const auth = String(req.headers.authorization || '');
+  if (SEPAY.apiKey && auth !== `Apikey ${SEPAY.apiKey}`) return res.status(401).json({ success: false });
+  const t = req.body || {};
+  if (t.transferType !== 'in') return res.json({ success: true, ignored: 'not incoming' });
+  const m = new RegExp(`${SEPAY.prefix}\s*(DH\d{6})`, 'i').exec(`${t.code || ''} ${t.content || ''} ${t.description || ''}`);
+  if (!m) return res.json({ success: true, ignored: 'no order code' });
+  const maDon = m[1].toUpperCase();
+  await ensureSepaySchema();
+  const result = await transaction(async (run) => {
+    let o;
+    try { o = await checkPayable(run, maDon, true); } catch (e) {
+      if (e instanceof AppError) return { ignored: e.message };
+      throw e;
+    }
+    const tong = Number(o.TongTien);
+    if (Number(t.transferAmount) < tong) return { ignored: 'insufficient amount' };
+    await finalizePayment(run, o, { ht: 'SEPAY', tong, gd: String(t.referenceCode || t.id || '').slice(0, 50) || null });
+    return { paid: maDon };
+  });
+  if (result.paid) await notify('PAID', `Đơn ${maDon} đã thanh toán chuyển khoản qua SePay`, null);
+  res.json({ success: true, ...result });
+}));
+
 // UC Thanh toán đơn hàng
 app.post('/api/orders/:maDon/pay', wrap(async (req, res) => {
   const { hinhThuc, tienKhachDua, soThe, hetHan, cvv, xacNhanChuaPhucVu } = req.body || {};
@@ -228,15 +316,7 @@ app.post('/api/orders/:maDon/pay', wrap(async (req, res) => {
       throw new AppError(400, 'Vui lòng chọn hình thức thanh toán');
     }
 
-    const so = maDon.slice(2);
-    await run(`INSERT INTO ThanhToan (MaTT, MaDon, HinhThuc, SoTien, TrangThai, TienKhachDua, TienThoi, SoTheRutGon, MaGiaoDich)
-               VALUES (@tt, @maDon, @ht, @tong, N'Thành công', @kd, @thoi, @the4, @gd)`,
-    { tt: 'TT' + so, maDon, ht: hinhThuc, tong, kd: khachDua, thoi, the4, gd: maGD });
-    await run(`INSERT INTO HoaDon (MaHD, MaTT, ThueVAT, TongTien, HinhThucTT) VALUES (@hd, @tt, @vat, @tong, @ht)`,
-      { hd: 'HD' + so, tt: 'TT' + so, vat: Number(o.ThueVAT), tong, ht: hinhThuc });
-    await run(`UPDATE DonHang SET TrangThai = 'DA_THANH_TOAN' WHERE MaDon = @maDon`, { maDon });
-    await run(`UPDATE ChiTietDonHang SET TrangThaiCheBien = 'DA_PHUC_VU' WHERE MaDon = @maDon AND TrangThaiCheBien NOT IN ('DA_HUY')`, { maDon });
-    await run(`UPDATE BanAn SET TrangThai = N'Trống' WHERE MaBan = @b`, { b: o.MaBan });
+    await finalizePayment(run, o, { ht: hinhThuc, tong, kd: khachDua, thoi, the4, gd: maGD });
   });
   res.json({ message: 'Thanh toán thành công – Cảm ơn quý khách', order: await loadOrder(maDon) });
 }));
@@ -451,7 +531,7 @@ function reportParams(q) {
   if (!re.test(tuNgay) || !re.test(denNgay)) throw new AppError(400, 'Vui lòng chọn đầy đủ khoảng thời gian');
   if (tuNgay > denNgay) throw new AppError(400, 'Khoảng thời gian không hợp lệ');
   if (denNgay > today()) throw new AppError(400, 'Ngày kết thúc không được vượt quá ngày hiện tại');
-  const hinhThuc = ['TIEN_MAT', 'THE'].includes(q.hinhThuc) ? q.hinhThuc : null;
+  const hinhThuc = ['TIEN_MAT', 'THE', 'SEPAY'].includes(q.hinhThuc) ? q.hinhThuc : null;
   return { tuNgay, denNgay, hinhThuc };
 }
 
@@ -505,7 +585,7 @@ app.get('/api/admin/reports/export', manager, wrap(async (req, res) => {
   const params = reportParams(req.query);
   const r = await buildReport(params);
   if (!r.soDon) throw new AppError(404, 'Không có dữ liệu để xuất báo cáo');
-  const ht = { TIEN_MAT: 'Tiền mặt', THE: 'Thẻ tín dụng' };
+  const ht = { TIEN_MAT: 'Tiền mặt', THE: 'Thẻ tín dụng', SEPAY: 'Chuyển khoản (SePay)' };
   const lines = [
     ['BÁO CÁO DOANH THU - PIZZA SELF-ORDER'],
     ['Từ ngày', r.tuNgay, 'Đến ngày', r.denNgay, 'Hình thức', r.hinhThuc ? ht[r.hinhThuc] : 'Tất cả'],
