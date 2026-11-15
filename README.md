@@ -15,23 +15,23 @@ Giao diện được thiết kế trên Figma (Figma Make) và cài đặt lại
 
 - **Giao diện:** React 18 + TypeScript, Vite, Tailwind CSS 4 (thư mục `client/`)
 - **Máy chủ API:** Node.js + Express (thư mục `server/`)
-- **Cơ sở dữ liệu:** Microsoft SQL Server – CSDL `PizzaDB`, 17 bảng (thư mục `database/`)
-- Kết nối CSDL bằng thư viện `mssql` (driver `msnodesqlv8`, ODBC Driver 18 for SQL Server)
+- **Cơ sở dữ liệu:** PostgreSQL – CSDL `pizzadb`, 18 bảng (thư mục `database/`)
+- Kết nối CSDL bằng thư viện `pg`
 
 ## Cài đặt và chạy
 
-Yêu cầu: Node.js ≥ 18, SQL Server 2019 trở lên, ODBC Driver 18 for SQL Server.
+Yêu cầu: Node.js ≥ 18, PostgreSQL 13 trở lên.
 
-1. **Tạo CSDL:** mở `database/PizzaDB.sql` trong SSMS và chạy (F5), hoặc:
+1. **Cài thư viện và build giao diện:**
    ```bash
-   sqlcmd -S localhost -E -C -I -f 65001 -i database/PizzaDB.sql
+   npm install && npm run setup
    ```
-   Script tạo lại CSDL `PizzaDB` cùng dữ liệu mẫu (thực đơn, 12 bàn, tài khoản nhân viên, đơn hàng 30 ngày gần nhất cho báo cáo).
 
-2. **Cài thư viện và build giao diện:**
+2. **Tạo CSDL:** tạo database trống `pizzadb` (ví dụ `createdb -U postgres pizzadb`), đặt biến `DATABASE_URL` rồi chạy:
    ```bash
-   npm run setup
+   npm run init-db
    ```
+   Script tạo lại toàn bộ bảng cùng dữ liệu mẫu (thực đơn, 12 bàn, tài khoản nhân viên, đơn hàng 30 ngày gần nhất cho báo cáo). Cũng có thể chạy `database/PizzaDB.sql` bằng psql hoặc pgAdmin.
 
 3. **Chạy máy chủ:**
    ```bash
@@ -39,11 +39,13 @@ Yêu cầu: Node.js ≥ 18, SQL Server 2019 trở lên, ODBC Driver 18 for SQL S
    ```
    Mở <http://localhost:3000>.
 
-Mặc định máy chủ kết nối SQL Server cục bộ bằng Windows Authentication. Có thể đổi chuỗi kết nối bằng biến môi trường `DB_CONN`, ví dụ dùng tài khoản SQL:
+Mặc định máy chủ kết nối `postgres://postgres:postgres@localhost:5432/pizzadb`. Đổi bằng biến môi trường `DATABASE_URL`; với CSDL cloud cần SSL thì thêm `DB_SSL=true` (hoặc `?sslmode=require` trong URL):
 
 ```
-DB_CONN=Driver={ODBC Driver 18 for SQL Server};Server=localhost;Database=PizzaDB;Uid=sa;Pwd=<mật khẩu>;TrustServerCertificate=yes;
+DATABASE_URL=postgres://<user>:<mật khẩu>@localhost:5432/pizzadb
 ```
+
+Trên Render, `render.yaml` tự tạo CSDL Postgres miễn phí và gán `DATABASE_URL`; sau lần deploy đầu, chạy `npm run init-db` (Shell của Render, hoặc từ máy với External URL) để tạo bảng.
 
 Khi phát triển giao diện: chạy `npm start` (API, cổng 3000) và `npm run dev --prefix client` (Vite, cổng 5173, tự chuyển tiếp `/api`).
 
@@ -85,7 +87,7 @@ pizza-self-order/
 ├─ server/
 │  ├─ index.js              Các API (khách hàng, bếp, quản lý)
 │  ├─ services.js           Nghiệp vụ: thực đơn, tính giá, đơn hàng
-│  └─ db.js                 Kết nối SQL Server
+│  └─ db.js                 Kết nối PostgreSQL
 └─ client/src/
    ├─ customer.tsx          Màn hình tại bàn: thực đơn, tùy chỉnh, đơn hàng, theo dõi, thanh toán
    ├─ staff.tsx             Đăng nhập, màn hình bếp, quản lý thực đơn, báo cáo

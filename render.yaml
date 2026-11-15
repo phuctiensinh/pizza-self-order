@@ -1,3 +1,9 @@
+databases:
+  - name: pizza-db
+    databaseName: pizzadb
+    plan: free
+    region: singapore
+
 services:
   - type: web
     name: pizza-self-order
@@ -14,14 +20,10 @@ services:
         value: Asia/Ho_Chi_Minh
       - key: AUTH_SECRET
         generateValue: true
-      - key: DB_SERVER
-        sync: false
-      - key: DB_NAME
-        value: PizzaDB
-      - key: DB_USER
-        sync: false
-      - key: DB_PASSWORD
-        sync: false
+      - key: DATABASE_URL
+        fromDatabase:
+          name: pizza-db
+          property: connectionString
       - key: SEPAY_BANK
         sync: false
       - key: SEPAY_ACCOUNT

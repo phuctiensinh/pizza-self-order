@@ -6,12 +6,12 @@
   "scripts": {
     "setup": "npm install --prefix server && npm install --prefix client && npm run build --prefix client",
     "build": "npm run build --prefix client",
-    "start": "node server/index.js",
-    "init-db": "node scripts/init-db.js"
+    "start": "node --env-file-if-exists=.env server/index.js",
+    "init-db": "node --env-file-if-exists=.env scripts/init-db.js"
   },
   "dependencies": {
     "cors": "^2.8.6",
     "express": "^5.3.0",
-    "mssql": "^12.7.14"
+    "pg": "^8.13.1"
   }
 }

@@ -3,3 +3,5 @@ client/dist/
 .env
 *.log
 *.tsbuildinfo
+.vercel
+.env*
