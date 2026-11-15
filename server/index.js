@@ -630,4 +630,22 @@ app.use((err, req, res, next) => { // eslint-disable-line no-unused-vars
 
 module.exports = app;
 const PORT = Number(process.env.PORT) || 3000;
+// Lần chạy đầu trên CSDL trống (Somee/Azure): tự tạo bảng và dữ liệu mẫu từ database/PizzaDB.sql
+async function initDatabaseIfEmpty() {
+  if (process.platform === 'win32' && !process.env.DB_SERVER) return;
+  const [r] = await query(`SELECT OBJECT_ID('NhanVien') AS id`);
+  if (r && r.id) return;
+  const text = fs.readFileSync(path.join(__dirname, '..', 'database', 'PizzaDB.sql'), 'utf8');
+  const start = text.indexOf('USE PizzaDB;');
+  const body = text.slice(text.indexOf('\n', start) + 1);
+  const batches = body.split(/^\s*GO\s*$/im).map((b) => b.trim()).filter(Boolean);
+  const { getPool } = require('./db');
+  const pool = await getPool();
+  for (const b of batches) await pool.request().batch(b);
+  console.log(`Đã khởi tạo CSDL (${batches.length} batch).`);
+}
+
+if (require.main === module) {
+  initDatabaseIfEmpty().catch((e) => console.error('Khởi tạo CSDL lỗi:', e.message));
+}
 if (require.main === module) app.listen(PORT, () => console.log(`Pizza Self-Order đang chạy tại http://localhost:${PORT}`));
