@@ -3,7 +3,7 @@
 // Có thể đổi bằng biến môi trường DB_CONN, ví dụ dùng tài khoản SQL:
 //   Driver={ODBC Driver 18 for SQL Server};Server=localhost;Database=PizzaDB;Uid=sa;Pwd=***;TrustServerCertificate=yes;
 // Khi có DB_SERVER (ví dụ Azure SQL khi chạy trên Vercel) thì dùng driver tedious (thuần JS).
-const useCloud = !!process.env.DB_SERVER;
+const useCloud = !!process.env.DB_SERVER || process.platform !== 'win32';
 const sql = useCloud ? require('mssql') : require('mssql/msnodesqlv8');
 
 const connectionString =
