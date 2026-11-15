@@ -1,0 +1,24 @@
+services:
+  - type: web
+    name: pizza-self-order
+    runtime: node
+    plan: free
+    region: singapore
+    buildCommand: npm install && npm install --prefix client --include=dev && npm run build --prefix client
+    startCommand: node server/index.js
+    healthCheckPath: /
+    envVars:
+      - key: NODE_VERSION
+        value: "20"
+      - key: TZ
+        value: Asia/Ho_Chi_Minh
+      - key: AUTH_SECRET
+        generateValue: true
+      - key: DB_SERVER
+        sync: false
+      - key: DB_NAME
+        value: PizzaDB
+      - key: DB_USER
+        sync: false
+      - key: DB_PASSWORD
+        sync: false

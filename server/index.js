@@ -19,11 +19,45 @@ const today = () => new Date(Date.now() - new Date().getTimezoneOffset() * 60000
 /* ------------------------------------------------------------------ */
 /* Xác thực nhân viên (token lưu trong bộ nhớ máy chủ)                 */
 /* ------------------------------------------------------------------ */
-const sessions = new Map(); // token -> { maNV, hoTen, vaiTro }
-const notifications = [];   // thông báo cho nhân viên: gọi phục vụ, món không thể chế biến
+// Token ký HMAC (không lưu trạng thái) để chạy được trên môi trường serverless như Vercel
+const SECRET = process.env.AUTH_SECRET || 'pizza-self-order-dev-secret';
+const TOKEN_TTL = 12 * 3600 * 1000;
+const sign = (data) => crypto.createHmac('sha256', SECRET).update(data).digest('base64url');
+const sessions = {
+  set(_t, user) { /* token tự mang thông tin */ },
+  delete() { /* token hết hạn tự nhiên */ },
+  create(user) {
+    const data = Buffer.from(JSON.stringify({ ...user, exp: Date.now() + TOKEN_TTL })).toString('base64url');
+    return `${data}.${sign(data)}`;
+  },
+  get(token) {
+    const [data, sig] = String(token || '').split('.');
+    if (!data || !sig || sign(data) !== sig) return undefined;
+    try {
+      const { exp, ...user } = JSON.parse(Buffer.from(data, 'base64url').toString());
+      return exp > Date.now() ? user : undefined;
+    } catch { return undefined; }
+  },
+};
+// Thông báo cho nhân viên (gọi phục vụ, món không thể chế biến) lưu trong bảng ThongBao
+async function ensureNotifyTable() {
+  await query(`IF OBJECT_ID('ThongBao') IS NULL CREATE TABLE ThongBao (
+    Id UNIQUEIDENTIFIER PRIMARY KEY, Loai NVARCHAR(50), NoiDung NVARCHAR(500), SoBan INT NULL,
+    ThoiGian DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME())`);
+}
+let notifyReady = null;
 function notify(type, message, soBan) {
-  notifications.unshift({ id: crypto.randomUUID(), type, message, soBan, time: new Date().toISOString() });
-  notifications.length = Math.min(notifications.length, 50);
+  notifyReady = notifyReady || ensureNotifyTable().catch((e) => { notifyReady = null; throw e; });
+  return notifyReady
+    .then(() => query('INSERT INTO ThongBao (Id, Loai, NoiDung, SoBan) VALUES (@id, @t, @m, @b)',
+      { id: crypto.randomUUID(), t: type, m: message, b: soBan ?? null }))
+    .catch((e) => console.error('notify', e));
+}
+async function recentNotifications() {
+  notifyReady = notifyReady || ensureNotifyTable().catch((e) => { notifyReady = null; throw e; });
+  await notifyReady;
+  const rows = await query('SELECT TOP 10 Id, Loai, NoiDung, SoBan, ThoiGian FROM ThongBao ORDER BY ThoiGian DESC');
+  return rows.map((r) => ({ id: r.Id, type: r.Loai, message: r.NoiDung, soBan: r.SoBan, time: new Date(r.ThoiGian).toISOString() }));
 }
 
 function requireRole(...roles) {
@@ -46,9 +80,8 @@ app.post('/api/auth/login', wrap(async (req, res) => {
     { u: String(tenDangNhap).trim(), p: hash },
   );
   if (!u) throw new AppError(401, 'Sai tên đăng nhập hoặc mật khẩu');
-  const token = crypto.randomBytes(24).toString('hex');
   const user = { maNV: u.MaNV, hoTen: u.HoTen, vaiTro: u.VaiTro };
-  sessions.set(token, user);
+  const token = sessions.create(user);
   res.json({ token, user });
 }));
 
@@ -137,7 +170,7 @@ app.post('/api/orders', wrap(async (req, res) => {
 }));
 
 app.post('/api/tables/:soBan/call-staff', wrap(async (req, res) => {
-  notify('CALL', `Bàn ${req.params.soBan} cần nhân viên hỗ trợ`, Number(req.params.soBan));
+  await notify('CALL', `Bàn ${req.params.soBan} cần nhân viên hỗ trợ`, Number(req.params.soBan));
   res.json({ message: 'Đã gọi nhân viên' });
 }));
 
@@ -230,7 +263,7 @@ app.get('/api/kitchen/orders', kitchen, wrap(async (req, res) => {
     SELECT
       (SELECT COUNT(*) FROM DonHang WHERE TrangThai IN ('DA_PHUC_VU', 'DA_THANH_TOAN') AND CAST(ThoiGianDat AS DATE) = CAST(GETDATE() AS DATE)) AS daXong,
       (SELECT COUNT(*) FROM DonHang WHERE TrangThai = 'DA_HUY' AND CAST(ThoiGianDat AS DATE) = CAST(GETDATE() AS DATE)) AS daHuy`);
-  res.json({ orders, stats, notifications: notifications.slice(0, 10), serverTime: new Date().toISOString() });
+  res.json({ orders, stats, notifications: await recentNotifications(), serverTime: new Date().toISOString() });
 }));
 
 app.post('/api/kitchen/orders/:maDon/advance', kitchen, wrap(async (req, res) => {
@@ -272,7 +305,7 @@ app.post('/api/kitchen/orders/:maDon/reject', kitchen, wrap(async (req, res) => 
     }
     await recalcOrder(run, maDon);
   });
-  notify('REJECT', `Đơn ${maDon} (Bàn ${soBan}): ${note}`, soBan);
+  await notify('REJECT', `Đơn ${maDon} (Bàn ${soBan}): ${note}`, soBan);
   res.json({ order: await loadOrder(maDon) });
 }));
 
@@ -515,5 +548,6 @@ app.use((err, req, res, next) => { // eslint-disable-line no-unused-vars
   res.status(500).json({ message: 'Lỗi hệ thống, vui lòng thử lại' });
 });
 
+module.exports = app;
 const PORT = Number(process.env.PORT) || 3000;
-app.listen(PORT, () => console.log(`Pizza Self-Order đang chạy tại http://localhost:${PORT}`));
+if (require.main === module) app.listen(PORT, () => console.log(`Pizza Self-Order đang chạy tại http://localhost:${PORT}`));

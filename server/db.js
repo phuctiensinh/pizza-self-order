@@ -2,17 +2,27 @@
 // Mặc định dùng Windows Authentication qua ODBC Driver 18.
 // Có thể đổi bằng biến môi trường DB_CONN, ví dụ dùng tài khoản SQL:
 //   Driver={ODBC Driver 18 for SQL Server};Server=localhost;Database=PizzaDB;Uid=sa;Pwd=***;TrustServerCertificate=yes;
-const sql = require('mssql/msnodesqlv8');
+// Khi có DB_SERVER (ví dụ Azure SQL khi chạy trên Vercel) thì dùng driver tedious (thuần JS).
+const useCloud = !!process.env.DB_SERVER;
+const sql = useCloud ? require('mssql') : require('mssql/msnodesqlv8');
 
 const connectionString =
   process.env.DB_CONN ||
   'Driver={ODBC Driver 18 for SQL Server};Server=localhost;Database=PizzaDB;Trusted_Connection=yes;TrustServerCertificate=yes;';
+const cloudConfig = {
+  server: process.env.DB_SERVER,
+  database: process.env.DB_NAME || 'PizzaDB',
+  user: process.env.DB_USER,
+  password: process.env.DB_PASSWORD,
+  options: { encrypt: true, trustServerCertificate: false },
+  pool: { max: 5, min: 0, idleTimeoutMillis: 30000 },
+};
 
 let poolPromise = null;
 
 function getPool() {
   if (!poolPromise) {
-    poolPromise = new sql.ConnectionPool({ connectionString }).connect().catch((err) => {
+    poolPromise = new sql.ConnectionPool(useCloud ? cloudConfig : { connectionString }).connect().catch((err) => {
       poolPromise = null;
       throw err;
     });
